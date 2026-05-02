@@ -188,24 +188,124 @@ page.goto('https://www.reddit.com/...')
 
 ## ✅ 成功方案详解
 
-### 核心思路
+### 一句话总结
 
-1. **通过 CDP 连接已有有头 Chrome**（保持登录态）
-2. **使用 JavaScript 直接操作 DOM**（绕过 Playwright 的可见性检查）
-3. **使用 `page.keyboard.type()` 输入文本**（触发真实键盘事件，Lexical 编辑器能正确响应）
-4. **使用 JavaScript 点击提交按钮**（绕过元素不可见限制）
+> **用 `page.keyboard.type()` 代替所有其他输入方式，用 `page.evaluate()` 的 JavaScript 代替所有 Playwright 的点击操作。**
 
-### 为什么 `keyboard.type()` 能成功？
+就这么简单。下面解释为什么。
 
-Playwright 的 `keyboard.type()` 会：
-1. 向浏览器发送真实的 `keydown` → `keypress` → `keyup` 事件序列
-2. 这些事件会被 Lexical 编辑器的键盘监听器捕获
-3. Lexical 内部状态更新，文本正确插入到 DOM
+---
 
-对比其他方法：
-- `dispatchKeyEvent`：只发到底层，不经过浏览器事件系统
-- `execCommand`：已废弃，现代编辑器不监听
-- `fill()`：直接设置 value，不触发键盘事件
+### 关键成功点 #1：输入必须用 `keyboard.type()`
+
+Reddit 使用 **Lexical 编辑器**（Facebook 的富文本框架）。这个编辑器不监听：
+- ❌ DOM value 变化（`fill()` 无效）
+- ❌ `document.execCommand`（已废弃）
+- ❌ 底层 CDP 键盘事件（`dispatchKeyEvent` 无效）
+
+**它只监听浏览器原生的 `keydown → keypress → keyup` 事件链。**
+
+Playwright 的 `keyboard.type()` 是唯一发送完整事件链的方法：
+
+```python
+# ✅ 正确：发送 keydown → keypress → keyup，Lexical 能捕获
+page.keyboard.type("Hello world")
+
+# ❌ 错误：只设置 value，不触发事件
+box.fill("Hello world")
+
+# ❌ 错误：只发底层 CDP 事件，不经过浏览器事件系统
+ws.send(json.dumps({"method": "Input.dispatchKeyEvent", ...}))
+
+# ❌ 错误：execCommand 已废弃，现代编辑器不监听
+document.execCommand('insertText', false, text)
+```
+
+---
+
+### 关键成功点 #2：点击必须用 JavaScript，不能用 Playwright 的 click()
+
+Reddit 的评论框在视口外（`y: -12077`），尺寸为 0x0。Playwright 的 `click()` 会检查：
+- 元素是否可见
+- 元素是否稳定（不移动）
+- 元素是否可交互
+
+全部失败，Timeout。
+
+**JavaScript 的 `element.click()` 不检查这些**，直接触发点击事件：
+
+```python
+# ✅ 正确：JavaScript 直接点击，不检查可见性
+page.evaluate("() => { document.querySelector('button').click() }")
+
+# ❌ 错误：Playwright 检查可见性，Timeout
+page.locator('button').click()  # Timeout 30000ms: element is not visible
+
+# ❌ 错误：force=True 也救不了尺寸为 0 的元素
+page.locator('button').click(force=True)  # 仍然失败
+```
+
+---
+
+### 关键成功点 #3：通过 CDP 连接已有 Chrome（保持登录态）
+
+不能用 headless（被检测），不能用新浏览器（要重新登录）。
+
+```python
+# ✅ 正确：连接已有 Chrome，cookies、localStorage、登录态全部保留
+browser = p.chromium.connect_over_cdp("http://127.0.0.1:18793")
+
+# ❌ 错误：headless 被 Reddit 检测，页面不加载
+browser = p.chromium.launch(headless=True)
+
+# ❌ 错误：新浏览器没有登录态
+browser = p.chromium.launch()
+```
+
+---
+
+### 完整成功公式
+
+```python
+from playwright.sync_api import sync_playwright
+
+with sync_playwright() as p:
+    # Step 1: CDP 连接已有 Chrome
+    browser = p.chromium.connect_over_cdp("http://127.0.0.1:18793")
+    page = browser.contexts[0].pages[0]
+    
+    # Step 2: JavaScript 点击触发器（绕过可见性检查）
+    page.evaluate("""() => {
+        document.querySelector('faceplate-textarea-input').click()
+    }""")
+    
+    # Step 3: JavaScript 聚焦编辑器
+    page.evaluate("""() => {
+        document.querySelector('[contenteditable="true"]').focus()
+    }""")
+    
+    # Step 4: keyboard.type() 输入（关键！触发真实键盘事件）
+    page.keyboard.type("Your comment here")
+    
+    # Step 5: JavaScript 点击提交（绕过可见性检查）
+    page.evaluate("""() => {
+        Array.from(document.querySelectorAll('button'))
+            .find(b => b.textContent.trim() === 'Comment').click()
+    }""")
+```
+
+---
+
+### 为什么其他人会失败？
+
+| 错误做法 | 失败原因 |
+|---------|---------|
+| `dispatchKeyEvent` | 只发到底层，不经过浏览器事件系统，Lexical 不响应 |
+| `execCommand` | 已废弃，现代编辑器不监听 |
+| `fill()` / `setValue()` | 直接改 DOM，不触发键盘事件 |
+| Playwright `click()` | 检查元素可见性，Reddit 元素在视口外 |
+| Selenium ChromeDriver | ARM64 系统没有对应版本 |
+| Headless 模式 | 被 Reddit 检测，页面拒绝加载 |
 
 ---
 
