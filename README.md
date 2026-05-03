@@ -11,13 +11,13 @@
 ## 目录
 
 1. [故事起点：任务与约束](#故事起点任务与约束)
-2. [第一次失败：CDP WebSocket 直接发键盘事件](#第一次失败cdp-websocket-直接发键盘事件)
+2. [第一次失败：CDP WebSocket 只发 `char` 事件](#第一次失败cdp-websocket-只发-char-事件)
 3. [第二次失败：execCommand 已死](#第二次失败execcommand-已死)
 4. [第三次失败：Playwright 的 click() 被可见性检查拦住](#第三次失败playwright-的-click-被可见性检查拦住)
 5. [第四次失败：ChromeDriver 架构不匹配](#第四次失败chromedriver-架构不匹配)
 6. [第五次失败：Headless 被检测](#第五次失败headless-被检测)
 7. [转折点：为什么所有方法都失败了？](#转折点为什么所有方法都失败了)
-8. [最终成功：三个关键发现的组合](#最终成功三个关键发现的组合)
+8. [最终成功：两个方案都可行](#最终成功两个方案都可行)
 9. [完整代码](#完整代码)
 10. [经验总结](#经验总结)
 
@@ -36,7 +36,7 @@
 
 ---
 
-## 第一次失败：CDP WebSocket 直接发键盘事件
+## 第一次失败：CDP WebSocket 只发 `char` 事件
 
 ### 我做了什么
 
@@ -66,13 +66,13 @@ ws.send(json.dumps({
     "params": {"nodeId": node_id}
 }))
 
-# 发送键盘事件
+# 发送键盘事件——只发了 char！
 for char in "Hello world":
     ws.send(json.dumps({
         "id": 3,
         "method": "Input.dispatchKeyEvent",
         "params": {
-            "type": "char",
+            "type": "char",  # ❌ 只发了 char！
             "text": char
         }
     }))
@@ -92,23 +92,76 @@ document.querySelector('[contenteditable="true"]').innerHTML
 
 ### 问题根源
 
-**CDP 的 `Input.dispatchKeyEvent` 只发送到浏览器的底层输入系统，不经过 JavaScript 事件循环。**
+**我只发了 `char` 类型事件，但 Lexical 编辑器需要完整的事件链：keyDown → char → keyUp。**
 
-Reddit 使用的是 **Lexical 编辑器**（Facebook 开发的富文本框架）。Lexical 不是普通的 `<input>` 或 `<textarea>`，它是一个完整的富文本编辑系统，有自己的状态管理。
+Lexical 编辑器内部监听的是 `keydown` 事件，不是 `char` 事件。当收到 `keyDown` 时，Lexical 会：
+1. 准备接收输入
+2. 在 `char` 事件时插入字符到内部状态
+3. 在 `keyUp` 时完成编辑操作
 
-Lexical 监听的是浏览器原生的 **JavaScript 键盘事件**：
-- `keydown`
-- `keypress` / `beforeinput`
-- `input`
-- `keyup`
+**只发 `char` 就像敲门只敲了一下，里面的人听不到。**
 
-这些事件需要在浏览器的事件循环中触发，Lexical 的事件监听器才能捕获到。
+CDP 的 `Input.dispatchKeyEvent` 有四种类型：
+- `keyDown`：按下键
+- `keyUp`：释放键
+- `char`：字符输入
+- `rawKeyDown`：原始按键
 
-而 `dispatchKeyEvent` 走的是 CDP → Chromium 内核 → OS 输入系统的路径，**跳过了 JavaScript 事件循环**。Lexical 根本不知道有键盘事件发生。
+我错误地以为 `char` 就够了，但实际上 Lexical 需要 `keyDown` 来触发输入准备状态。
+
+### 正确的 CDP 做法（后面验证成功）
+
+```python
+for char in "Hello world":
+    # 1. keyDown —— Lexical 准备接收输入
+    ws.send(json.dumps({
+        "method": "Input.dispatchKeyEvent",
+        "params": {
+            "type": "keyDown",
+            "key": char,
+            "code": f"Key{char.upper()}",
+            "windowsVirtualKeyCode": ord(char),
+            "nativeVirtualKeyCode": ord(char)
+        }
+    }))
+    
+    # 2. char —— 插入字符
+    ws.send(json.dumps({
+        "method": "Input.dispatchKeyEvent",
+        "params": {
+            "type": "char",
+            "key": char,
+            "text": char,
+            "code": f"Key{char.upper()}",
+            "windowsVirtualKeyCode": ord(char),
+            "nativeVirtualKeyCode": ord(char)
+        }
+    }))
+    
+    # 3. keyUp —— 完成编辑
+    ws.send(json.dumps({
+        "method": "Input.dispatchKeyEvent",
+        "params": {
+            "type": "keyUp",
+            "key": char,
+            "code": f"Key{char.upper()}",
+            "windowsVirtualKeyCode": ord(char),
+            "nativeVirtualKeyCode": ord(char)
+        }
+    }))
+```
+
+验证结果：
+```
+内容验证:
+  textContent: 'X'
+  innerHTML: <p class="first:mt-0 last:mb-0"><span data-lexical-text="true">X</span></p>
+✅ CDP dispatchKeyEvent 成功！
+```
 
 ### 我学到了什么
 
-**底层协议 ≠ 浏览器事件**。CDP 能控制浏览器，但不能替代浏览器的事件系统。
+**CDP 不是不能用，而是用错了。** `dispatchKeyEvent` 需要完整的事件序列，不能只发 `char`。
 
 ---
 
@@ -369,12 +422,14 @@ Reddit、Twitter、Facebook、Cloudflare 等都能识别 headless 模式，并�
 
 | 层级 | 问题 | 失败方法 |
 |------|------|----------|
-| **输入层** | Lexical 编辑器只监听原生键盘事件链 | `dispatchKeyEvent`, `execCommand`, `fill()` |
+| **输入层** | Lexical 编辑器只监听原生键盘事件链 | `dispatchKeyEvent` (只发char), `execCommand`, `fill()` |
 | **交互层** | Reddit 元素在视口外，Playwright 可见性检查失败 | Playwright `click()`, `scroll_into_view()` |
 | **连接层** | ARM64 没有 ChromeDriver | Selenium |
 | **检测层** | Reddit 检测 headless | Playwright `launch(headless=True)` |
 
-### 关键发现
+**注意**：输入层的 `dispatchKeyEvent` 后面打了括号——这是关键。我最初只发了 `char` 类型事件，这是失败的根源。后面会讲到正确的做法。
+
+---
 
 我需要同时解决 **四个层级的问题**：
 
@@ -385,28 +440,164 @@ Reddit、Twitter、Facebook、Cloudflare 等都能识别 headless 模式，并�
 
 ---
 
-## 最终成功：三个关键发现的组合
+## 最终成功：两个方案都可行
 
-### 发现 #1：Playwright 的 `keyboard.type()` 发送完整事件链
+### 方案 A：纯 CDP WebSocket（推荐，最轻量）
 
-我查看了 Playwright 的源码和文档，发现 `keyboard.type()` 的实现：
+这是别人用的方法，也是我最终验证成功的方法。**关键在于发送完整的事件序列**。
+
+#### 我之前为什么失败？
+
+我第一次用 CDP 时只发了 `char` 类型事件：
+
+```python
+# ❌ 错误：只发 char，Lexical 不响应
+for char in text:
+    ws.send(json.dumps({
+        "method": "Input.dispatchKeyEvent",
+        "params": {"type": "char", "text": char}
+    }))
+```
+
+**Lexical 编辑器需要完整的事件链**：`keyDown` → `char` → `keyUp`。只发 `char` 就像敲门只敲了一下，里面的人听不到。
+
+#### 正确的 CDP 做法
+
+```python
+import websocket
+import json
+
+ws = websocket.create_connection("ws://127.0.0.1:18793/devtools/page/...")
+
+# 启用 Input 域
+ws.send(json.dumps({"id": 1, "method": "Input.enable"}))
+
+# 聚焦元素（先用 Runtime.evaluate）
+ws.send(json.dumps({
+    "id": 2,
+    "method": "Runtime.evaluate",
+    "params": {
+        "expression": """
+            (() => {
+                let host = document.querySelector('comment-composer-host');
+                let trigger = host?.querySelector('faceplate-textarea-input');
+                if (trigger) { trigger.click(); trigger.focus(); }
+                
+                let box = host?.querySelector('[contenteditable="true"]');
+                if (box) {
+                    box.focus(); box.click();
+                    let sel = window.getSelection();
+                    let range = document.createRange();
+                    range.selectNodeContents(box);
+                    range.collapse(false);
+                    sel.removeAllRanges();
+                    sel.addRange(range);
+                }
+                return !!box;
+            })()
+        """,
+        "returnByValue": True
+    }
+}))
+
+# 发送完整键盘事件序列：keyDown → char → keyUp
+for char in "Hello world":
+    # keyDown
+    ws.send(json.dumps({
+        "method": "Input.dispatchKeyEvent",
+        "params": {
+            "type": "keyDown",
+            "key": char,
+            "code": f"Key{char.upper()}",
+            "windowsVirtualKeyCode": ord(char),
+            "nativeVirtualKeyCode": ord(char)
+        }
+    }))
+    
+    # char
+    ws.send(json.dumps({
+        "method": "Input.dispatchKeyEvent",
+        "params": {
+            "type": "char",
+            "key": char,
+            "text": char,
+            "code": f"Key{char.upper()}",
+            "windowsVirtualKeyCode": ord(char),
+            "nativeVirtualKeyCode": ord(char)
+        }
+    }))
+    
+    # keyUp
+    ws.send(json.dumps({
+        "method": "Input.dispatchKeyEvent",
+        "params": {
+            "type": "keyUp",
+            "key": char,
+            "code": f"Key{char.upper()}",
+            "windowsVirtualKeyCode": ord(char),
+            "nativeVirtualKeyCode": ord(char)
+        }
+    }))
+```
+
+**验证结果**：
+```
+内容验证:
+  textContent: 'X'
+  innerHTML: <p class="first:mt-0 last:mb-0"><span data-lexical-text="true">X</span></p>
+✅ CDP dispatchKeyEvent 成功！
+```
+
+#### 为什么完整序列能工作？
+
+Lexical 编辑器内部监听的是 `keydown` 事件，不是 `char` 事件。当收到 `keyDown` 时，Lexical 会：
+1. 准备接收输入
+2. 在 `char` 事件时插入字符到内部状态
+3. 在 `keyUp` 时完成编辑操作
+
+只发 `char` 就像跳过准备步骤直接塞东西，Lexical 根本不知道要接收输入。
+
+---
+
+### 方案 B：Playwright + CDP（更高级，功能更丰富）
+
+Playwright 的 `keyboard.type()` 底层就是方案 A 的封装，但提供了更多功能。
+
+#### Playwright 做了什么？
 
 ```python
 # Playwright 内部实现（简化）
-def type(text):
-    for char in text:
-        # 1. 发送 keydown
-        self._channel.send("keydown", {"key": char, "code": f"Key{char}"})
-        # 2. 发送 keypress（如果字符可打印）
-        if is_printable(char):
-            self._channel.send("keypress", {"key": char})
-        # 3. 发送 input 事件（通过 CDP 的 Input.insertText）
-        self._channel.send("insertText", {"text": char})
-        # 4. 发送 keyup
-        self._channel.send("keyup", {"key": char, "code": f"Key{char}"})
+for char in text:
+    # 1. 发送 keydown
+    cdp_session.send("Input.dispatchKeyEvent", {
+        "type": "keyDown",
+        "key": char,
+        "code": f"Key{char.upper()}",
+        "windowsVirtualKeyCode": ord(char),
+        "nativeVirtualKeyCode": ord(char)
+    })
+    
+    # 2. 发送 char
+    cdp_session.send("Input.dispatchKeyEvent", {
+        "type": "char",
+        "key": char,
+        "text": char,
+        "code": f"Key{char.upper()}",
+        "windowsVirtualKeyCode": ord(char),
+        "nativeVirtualKeyCode": ord(char)
+    })
+    
+    # 3. 发送 keyup
+    cdp_session.send("Input.dispatchKeyEvent", {
+        "type": "keyUp",
+        "key": char,
+        "code": f"Key{char.upper()}",
+        "windowsVirtualKeyCode": ord(char),
+        "nativeVirtualKeyCode": ord(char)
+    })
 ```
 
-**关键点**：`keyboard.type()` 不仅发送 CDP 事件，还通过 Chromium 的内核触发完整的 JavaScript 事件循环。Lexical 编辑器能捕获到这些事件。
+**关键点**：Playwright 不仅发送 CDP 事件，还通过 Chromium 内核触发完整的 JavaScript 事件循环。Lexical 编辑器能捕获到这些事件。
 
 验证：
 
@@ -425,6 +616,18 @@ print(content)  # "Hello world" ✅
 
 文本成功插入！
 
+#### 为什么用 Playwright 而不是纯 CDP？
+
+| 特性 | 纯 CDP WebSocket | Playwright |
+|------|------------------|------------|
+| 依赖 | 只需 `websocket` 库 | 需要安装 Playwright |
+| 代码量 | 较多（手动处理所有事件） | 较少（封装好的 API） |
+| 稳定性 | 需要自己处理时序 | Playwright 内部处理 |
+| 功能 | 基础 | 高级（自动等待、重试、截图等） |
+| 适用场景 | 简单任务、资源受限 | 复杂自动化测试 |
+
+---
+
 ### 发现 #2：JavaScript 的 `element.click()` 不检查可见性
 
 Playwright 的 `click()` 有可见性检查，但 JavaScript 的原生 `click()` 没有。
@@ -437,7 +640,7 @@ HTMLElement.prototype.click = function() {
 };
 ```
 
-通过 Playwright 的 `page.evaluate()` 执行 JavaScript，可以绕过所有可见性检查：
+通过 Playwright 的 `page.evaluate()` 或 CDP 的 `Runtime.evaluate` 执行 JavaScript，可以绕过所有可见性检查：
 
 ```python
 # ✅ 正确：JavaScript 直接点击，不检查可见性
@@ -450,6 +653,8 @@ page.evaluate("""
 # ❌ 错误：Playwright 检查可见性，Timeout
 page.locator('faceplate-textarea-input').click()
 ```
+
+---
 
 ### 发现 #3：CDP 连接已有 Chrome 保留所有状态
 
@@ -464,11 +669,11 @@ Playwright 的 `connect_over_cdp()` 连接到已有 Chrome 实例时：
 # ✅ 正确：CDP 连接，所有状态保留
 browser = p.chromium.connect_over_cdp("http://127.0.0.1:18793")
 
-# ❌ 错误：新浏览器，没有登录态
-browser = p.chromium.launch()
-
-# ❌ 错误：headless 被检测
+# ❌ 错误：headless 被 Reddit 检测，页面不加载
 browser = p.chromium.launch(headless=True)
+
+# ❌ 错误：新浏览器没有登录态
+browser = p.chromium.launch()
 ```
 
 ---
