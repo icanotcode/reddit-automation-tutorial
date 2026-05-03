@@ -909,5 +909,135 @@ page.title() -> ""（空字符串）
 
 ---
 
+## 附录二：Reddit 点赞自动化
+
+评论成功后，你可能还想给帖子点赞。Reddit 的点赞按钮和评论框一样，使用了 Shadow DOM，所以 Playwright 的普通选择器无法直接定位。
+
+### 点赞按钮的结构
+
+Reddit 帖子使用自定义元素 `<shreddit-post>`，点赞按钮在它的 Shadow DOM 内部：
+
+```html
+<shreddit-post thingid="t3_xxxxx">
+  #shadow-root
+    <button>  <!-- 第一个按钮 = upvote -->
+      <svg>...</svg>  <!-- 向上箭头 -->
+    </button>
+    <div>1234</div>  <!-- 分数 -->
+    <button>  <!-- 第二个按钮 = downvote -->
+      <svg>...</svg>  <!-- 向下箭头 -->
+    </button>
+</shreddit-post>
+```
+
+### 为什么普通方法失败？
+
+| 方法 | 结果 | 原因 |
+|------|------|------|
+| `page.locator('button[aria-label="upvote"]').click()` | ❌ 找不到 | aria-label 在 Shadow DOM 内 |
+| `page.locator('.upvote-button').click()` | ❌ 找不到 | CSS 类在 Shadow DOM 内 |
+| `page.evaluate(() => document.querySelector('button').click())` | ❌ 点错按钮 | 主 DOM 里有很多按钮 |
+
+### 正确的点赞方法
+
+和评论一样，使用 `page.evaluate()` + JavaScript 直接操作 Shadow DOM：
+
+```python
+from playwright.sync_api import sync_playwright
+
+def upvote_reddit_post(post_url):
+    with sync_playwright() as p:
+        browser = p.chromium.connect_over_cdp("http://127.0.0.1:18793")
+        context = browser.contexts[0]
+        page = context.pages[0]
+        
+        # 导航到目标帖子
+        page.goto(post_url)
+        time.sleep(4)
+        
+        # JavaScript 直接操作 Shadow DOM
+        result = page.evaluate("""
+            () => {
+                let post = document.querySelector('shreddit-post');
+                if (post && post.shadowRoot) {
+                    let buttons = post.shadowRoot.querySelectorAll('button');
+                    if (buttons.length >= 1) {
+                        buttons[0].click();  // 第一个按钮 = upvote
+                        return 'Upvote clicked';
+                    }
+                    return 'No buttons in shadow root';
+                }
+                return 'No shreddit-post found';
+            }
+        """)
+        
+        print(f"点赞结果: {result}")
+        time.sleep(2)
+        browser.close()
+
+# 使用
+upvote_reddit_post('https://www.reddit.com/r/framework/comments/1t2vjel/')
+```
+
+### 验证点赞成功
+
+点赞后，按钮颜色会从灰色变成橙色（Reddit 的 upvote 颜色）。可以通过检查按钮颜色验证：
+
+```python
+# 验证点赞状态
+color = page.evaluate("""
+    () => {
+        let post = document.querySelector('shreddit-post');
+        if (post && post.shadowRoot) {
+            let buttons = post.shadowRoot.querySelectorAll('button');
+            if (buttons[0]) {
+                return window.getComputedStyle(buttons[0]).color;
+            }
+        }
+        return 'unknown';
+    }
+""")
+
+# 已点赞 = rgb(255, 69, 0) 或类似的橙色
+# 未点赞 = rgb(128, 128, 128) 或类似的灰色
+print(f"按钮颜色: {color}")
+```
+
+### 从列表页批量点赞
+
+如果你想在列表页给多个帖子点赞，同样使用 Shadow DOM 遍历：
+
+```python
+# 在 r/subreddit 列表页批量点赞
+result = page.evaluate("""
+    () => {
+        let posts = document.querySelectorAll('shreddit-post');
+        let results = [];
+        
+        for (let post of posts) {
+            if (post.shadowRoot) {
+                let buttons = post.shadowRoot.querySelectorAll('button');
+                if (buttons.length >= 1) {
+                    buttons[0].click();
+                    results.push('Liked: ' + post.getAttribute('thingid'));
+                }
+            }
+        }
+        
+        return results;
+    }
+""")
+```
+
+### 点赞的坑
+
+| 坑 | 现象 | 解决 |
+|---|---|---|
+| 帖子已删除 | Page not found，无法点赞 | 跳过，无法解决 |
+| Shadow DOM 未加载 | `shadowRoot` 为 null | 增加等待时间 |
+| 已点赞状态 | 重复点击会取消点赞 | 先检查按钮颜色 |
+
+---
+
 **许可证**：MIT  
 **贡献**：欢迎提交 PR 补充踩坑经验
