@@ -1039,5 +1039,335 @@ result = page.evaluate("""
 
 ---
 
+## 附录三：纯 WebSocket/CDP 方案（无 Playwright 依赖）
+
+如果你更倾向于轻量级的方案，可以直接使用 WebSocket 连接 Chrome DevTools Protocol (CDP)，无需安装 Playwright。
+
+### 为什么用 WebSocket/CDP？
+
+| 对比项 | Playwright | WebSocket/CDP |
+|--------|-----------|---------------|
+| 安装体积 | ~200MB（含 Chromium） | 仅需 `websocket-client` 库 |
+| 抽象层级 | 高（封装了底层细节） | 低（直接操作浏览器） |
+| 可见性检查 | 严格（会拦住视口外元素） | 无（JS 直接执行） |
+| 适用场景 | 复杂测试、多浏览器支持 | 简单任务、资源受限环境 |
+
+### WebSocket 点赞完整代码
+
+```python
+import websocket
+import json
+import requests
+import time
+
+
+def upvote_with_websocket(cdp_port=18793, post_url=None):
+    """
+    使用纯 WebSocket/CDP 给 Reddit 帖子点赞
+    
+    前提：
+    1. Chrome 已启动并开启远程调试：
+       chromium --remote-debugging-port=18793
+    2. 已在 Chrome 中登录 Reddit
+    """
+    
+    # Step 1: 获取 DevTools 页面列表
+    response = requests.get(f"http://127.0.0.1:{cdp_port}/json/list")
+    pages = response.json()
+    
+    # 使用第一个可用页面
+    ws_url = pages[0]['webSocketDebuggerUrl']
+    print(f"连接: {ws_url[:50]}...")
+    
+    # Step 2: 连接 WebSocket
+    ws = websocket.create_connection(ws_url)
+    print("✅ WebSocket 已连接")
+    
+    # Step 3: 如果指定了帖子 URL，先导航到该页面
+    if post_url:
+        ws.send(json.dumps({
+            "id": 1,
+            "method": "Runtime.evaluate",
+            "params": {
+                "expression": f"window.location.href = '{post_url}'",
+                "returnByValue": True
+            }
+        }))
+        
+        # 接收响应
+        response = ws.recv()
+        data = json.loads(response)
+        if data.get('id') == 1:
+            print(f"✅ 导航到: {post_url}")
+        
+        # 等待页面加载
+        time.sleep(5)
+    
+    # Step 4: 执行点赞（通过 Runtime.evaluate 执行 JavaScript）
+    ws.send(json.dumps({
+        "id": 2,
+        "method": "Runtime.evaluate",
+        "params": {
+            "expression": """
+                (() => {
+                    let post = document.querySelector('shreddit-post');
+                    if (post && post.shadowRoot) {
+                        let buttons = post.shadowRoot.querySelectorAll('button');
+                        if (buttons.length >= 1) {
+                            buttons[0].click();
+                            return {
+                                success: true,
+                                message: 'Upvote clicked',
+                                buttonCount: buttons.length
+                            };
+                        }
+                        return { success: false, message: 'No buttons in shadow root' };
+                    }
+                    return { success: false, message: 'No shreddit-post found' };
+                })()
+            """,
+            "returnByValue": True
+        }
+    }))
+    
+    # 接收响应
+    response = ws.recv()
+    data = json.loads(response)
+    
+    if data.get('id') == 2 and 'result' in data:
+        result = data['result'].get('result', {})
+        if result.get('type') == 'object':
+            # 对象类型的返回值
+            value = result.get('value', {})
+            print(f"点赞结果: {value}")
+        elif result.get('type') == 'string':
+            # 字符串类型的返回值
+            print(f"点赞结果: {result.get('value')}")
+    
+    # Step 5: 验证点赞状态
+    time.sleep(1)
+    ws.send(json.dumps({
+        "id": 3,
+        "method": "Runtime.evaluate",
+        "params": {
+            "expression": """
+                (() => {
+                    let post = document.querySelector('shreddit-post');
+                    if (post && post.shadowRoot) {
+                        let buttons = post.shadowRoot.querySelectorAll('button');
+                        if (buttons[0]) {
+                            return {
+                                color: window.getComputedStyle(buttons[0]).color,
+                                pressed: buttons[0].getAttribute('aria-pressed')
+                            };
+                        }
+                    }
+                    return { error: 'No post found' };
+                })()
+            """,
+            "returnByValue": True
+        }
+    }))
+    
+    # 接收响应
+    response = ws.recv()
+    data = json.loads(response)
+    
+    if data.get('id') == 3 and 'result' in data:
+        result = data['result'].get('result', {})
+        if result.get('type') == 'object':
+            value = result.get('value', {})
+            print(f"按钮状态: {value}")
+            
+            # 判断颜色
+            color = value.get('color', '')
+            if '255' in color and ('69' in color or '99' in color or '100' in color):
+                print("🎉 点赞成功（橙色按钮）")
+            else:
+                print("✅ 已点击（按钮状态已更新）")
+    
+    # 关闭连接
+    ws.close()
+    print("✅ WebSocket 连接已关闭")
+
+
+# 使用示例
+if __name__ == "__main__":
+    upvote_with_websocket(
+        post_url='https://www.reddit.com/r/framework/comments/1t2vjel/'
+    )
+```
+
+### WebSocket 评论完整代码
+
+同样的方式也可以用于评论，关键是使用 `Input.dispatchKeyEvent` 发送完整的键盘事件链：
+
+```python
+import websocket
+import json
+import requests
+import time
+
+
+def comment_with_websocket(cdp_port=18793, post_url=None, comment_text=""):
+    """
+    使用纯 WebSocket/CDP 在 Reddit 帖子下评论
+    """
+    
+    # 获取页面列表并连接
+    response = requests.get(f"http://127.0.0.1:{cdp_port}/json/list")
+    pages = response.json()
+    ws_url = pages[0]['webSocketDebuggerUrl']
+    
+    ws = websocket.create_connection(ws_url)
+    print("✅ WebSocket 已连接")
+    
+    # 导航到帖子
+    if post_url:
+        ws.send(json.dumps({
+            "id": 1,
+            "method": "Runtime.evaluate",
+            "params": {
+                "expression": f"window.location.href = '{post_url}'",
+                "returnByValue": True
+            }
+        }))
+        ws.recv()
+        time.sleep(5)
+    
+    # Step 1: 启用 Input 域（用于发送键盘事件）
+    ws.send(json.dumps({"id": 2, "method": "Input.enable"}))
+    ws.recv()
+    print("✅ Input 域已启用")
+    
+    # Step 2: 聚焦评论框（通过 Runtime.evaluate）
+    focus_script = """
+        (() => {
+            let host = document.querySelector('comment-composer-host');
+            let trigger = host?.querySelector('faceplate-textarea-input');
+            if (trigger) { trigger.click(); trigger.focus(); }
+            
+            let box = host?.querySelector('[contenteditable="true"]');
+            if (box) {
+                box.focus();
+                box.click();
+                let sel = window.getSelection();
+                let range = document.createRange();
+                range.selectNodeContents(box);
+                range.collapse(false);
+                sel.removeAllRanges();
+                sel.addRange(range);
+                return 'Focused';
+            }
+            return 'No box found';
+        })()
+    """
+    
+    ws.send(json.dumps({
+        "id": 3,
+        "method": "Runtime.evaluate",
+        "params": {"expression": focus_script, "returnByValue": True}
+    }))
+    ws.recv()
+    time.sleep(2)
+    
+    # Step 3: 发送完整键盘事件链输入文本
+    # Lexical 编辑器需要：keyDown → char → keyUp
+    for char in comment_text:
+        # keyDown
+        ws.send(json.dumps({
+            "method": "Input.dispatchKeyEvent",
+            "params": {
+                "type": "keyDown",
+                "key": char,
+                "code": f"Key{char.upper()}",
+                "windowsVirtualKeyCode": ord(char),
+                "nativeVirtualKeyCode": ord(char)
+            }
+        }))
+        
+        # char
+        ws.send(json.dumps({
+            "method": "Input.dispatchKeyEvent",
+            "params": {
+                "type": "char",
+                "key": char,
+                "text": char,
+                "code": f"Key{char.upper()}",
+                "windowsVirtualKeyCode": ord(char),
+                "nativeVirtualKeyCode": ord(char)
+            }
+        }))
+        
+        # keyUp
+        ws.send(json.dumps({
+            "method": "Input.dispatchKeyEvent",
+            "params": {
+                "type": "keyUp",
+                "key": char,
+                "code": f"Key{char.upper()}",
+                "windowsVirtualKeyCode": ord(char),
+                "nativeVirtualKeyCode": ord(char)
+            }
+        }))
+    
+    print(f"✅ 已输入: {comment_text[:50]}...")
+    time.sleep(2)
+    
+    # Step 4: 点击 Comment 按钮
+    ws.send(json.dumps({
+        "id": 4,
+        "method": "Runtime.evaluate",
+        "params": {
+            "expression": """
+                (() => {
+                    let buttons = Array.from(document.querySelectorAll('button'));
+                    let btn = buttons.find(b => b.textContent?.trim().toLowerCase() === 'comment');
+                    if (btn && !btn.disabled) {
+                        btn.click();
+                        return 'Comment clicked';
+                    }
+                    return 'No comment button';
+                })()
+            """,
+            "returnByValue": True
+        }
+    }))
+    
+    response = ws.recv()
+    data = json.loads(response)
+    if data.get('id') == 4:
+        result = data['result'].get('result', {}).get('value', 'N/A')
+        print(f"提交结果: {result}")
+    
+    ws.close()
+    print("✅ 完成")
+
+
+# 使用示例
+if __name__ == "__main__":
+    comment_with_websocket(
+        post_url='https://www.reddit.com/r/framework/comments/1t2vjel/',
+        comment_text='Interesting setup! I wonder how the performance compares to a dedicated desktop.'
+    )
+```
+
+### WebSocket 方案的注意事项
+
+| 注意点 | 说明 |
+|--------|------|
+| 消息顺序 | CDP 是异步协议，需要按 ID 匹配请求和响应 |
+| 错误处理 | `Runtime.evaluate` 返回的对象包含 `exceptionDetails` 字段 |
+| 超时处理 | 需要自行实现超时逻辑，不像 Playwright 有内置等待 |
+| 依赖 | 仅需 `websocket-client` 和 `requests` 库 |
+
+### 安装依赖
+
+```bash
+pip install websocket-client requests
+```
+
+---
+
 **许可证**：MIT  
 **贡献**：欢迎提交 PR 补充踩坑经验
