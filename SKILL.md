@@ -1,11 +1,24 @@
 ---
 name: reddit-automation-websocket
 description: Reddit自动化操作 - 使用WebSocket/CDP方式点赞和评论
-version: 1.0
+version: 1.1
 tags: [reddit, automation, cdp, websocket, social-media]
+source: https://github.com/icanotcode/reddit-automation-tutorial/blob/master/SKILL.md
 ---
 
 # Reddit 自动化操作（WebSocket/CDP 方式）
+
+> **版本**: 1.1  
+> **更新日期**: 2026-05-10  
+> **GitHub 源码**: https://github.com/icanotcode/reddit-automation-tutorial/blob/master/SKILL.md  
+> **完整教程**: https://github.com/icanotcode/reddit-automation-tutorial/blob/master/README.md
+
+## 更新记录
+
+| 版本 | 日期 | 变更 |
+|---|---|---|
+| 1.1 | 2026-05-10 | 添加 GitHub 源码链接；与教程仓库同步 |
+| 1.0 | 2026-05-10 | 初始版本：点赞、评论、常见坑表 |
 
 ## 前置条件
 - Chrome/Chromium 已启动并开启远程调试：`chromium --remote-debugging-port=18793`
