@@ -447,7 +447,7 @@ Reddit、Twitter、Facebook、Cloudflare 等都能识别 headless 模式，并�
 
 ### 方案 A：纯 CDP WebSocket 键盘事件（轻量，但有字符乱序风险）
 
-> ⚠️ **2026-05-16 更新**：此方案在 Lexical 0.36+ 可能出现字符乱序（如 "Thatg's" 而非 "That's"）。Reddit 的 Lexical 编辑器对合成键盘事件的处理有变化。如果追求稳定性，建议改用方案 C。
+> ⚠️ **2026-05-16 更新**：此方案在当前 Reddit 所用的 Lexical 版本（0.36.1）上出现字符乱序（如 "Thatg's" 而非 "That's"）。原因尚不明确是 Lexical 版本变化还是 Reddit 自定义行为。如果追求稳定性，建议改用方案 C。
 
 这是最初验证成功的方法。**关键在于发送完整的事件序列**。
 
@@ -550,7 +550,7 @@ for char in "Hello world":
 ✅ CDP dispatchKeyEvent 成功！
 ```
 
-**2026-05-16 更新**：此方案在后续测试中出现字符乱序问题（如 "Thatg's" 而非 "That's"）。Lexical 0.36+ 对合成键盘事件的处理有变化，在需要稳定输入的场景建议改用方案 C。
+**2026-05-16 更新**：此方案在后续测试中出现字符乱序问题（如 "Thatg's" 而非 "That's"）。当前 Reddit 使用 Lexical 0.36.1，乱序是在该版本上观察到的，原因尚不明确是版本变化还是 Reddit 自定义行为。在需要稳定输入的场景建议改用方案 C。
 
 #### 为什么完整序列能工作？（历史记录）
 
@@ -565,7 +565,7 @@ Lexical 编辑器内部监听的是 `keydown` 事件，不是 `char` 事件。�
 
 ### 方案 B：Playwright + CDP（更高级，功能更丰富，同样有字符乱序风险）
 
-> ⚠️ **2026-05-16 更新**：同样受 Lexical 键盘事件处理变化影响。`keyboard.type()` 底层也是方案 A 的封装，在 Lexical 0.36+ 上可能出现同样问题。
+> ⚠️ **2026-05-16 更新**：同样在当前 Reddit 的 Lexical 0.36.1 上观察到键盘事件乱序。`keyboard.type()` 底层也是方案 A 的封装，可能遇到同样问题。
 
 Playwright 的 `keyboard.type()` 底层就是方案 A 的封装，但提供了更多功能。
 
@@ -636,7 +636,7 @@ print(content)  # "Hello world" ✅
 
 ### 方案 C：Lexical `setEditorState`（2026-05-16 推荐 ✅）
 
-> **这是目前最可靠的方案**，直接操作 Lexical 编辑器的内部状态，完全绕过键盘事件链。已验证在 Lexical 0.36.1+ 上成功发布评论。
+> **这是目前最可靠的方案**，直接操作 Lexical 编辑器的内部状态，完全绕过键盘事件链。已验证在当前 Reddit 的 Lexical 0.36.1 上成功发布评论。
 
 #### 核心原理
 
@@ -850,7 +850,7 @@ if __name__ == "__main__":
 | 对比项 | 方案 A (键盘事件) | 方案 C (setEditorState) |
 |--------|-------------------|------------------------|
 | 事件依赖 | 需要 `keyDown→char→keyUp` 完整链 | 直接操作状态，不依赖事件 |
-| Lexical 0.36+ | 可能出现字符乱序 | 稳定可靠 |
+| Lexical 0.36.1 | 观察到字符乱序 | 稳定可靠 |
 | 速度 | 每字符 50ms+，长文本慢 | 一次性设置，毫秒级 |
 | 可靠性 | 受时序影响 | 原子操作，状态直接写入 |
 | 复杂度 | 需要处理每个字符 | 一次 JSON 状态设置 |
@@ -1106,7 +1106,7 @@ if __name__ == "__main__":
 在调试过程中，我曾错误地声称"Reddit 最近两天升级了 Lexical，导致之前的方法失效"。这是**幻觉**。
 
 **事实核查**：
-- Lexical 0.36.1 是一个正式版本，不是"最近两天"升级的
+- Lexical 0.36.1 是 Reddit 当前使用的版本，不是"最近两天"升级的。这个版本号来自 `document.querySelector('shreddit-composer [contenteditable="true"]').__lexicalEditor.constructor.version` 的返回值。
 - `innerText + InputEvent` **从未成功过**（选择器错误：`comment-composer-host` 只是 slot 壳，真正的编辑器在 `shreddit-composer` 内）
 - 之前声称"成功"的日志实际上是 `Text set:` 为空（输入失败）
 
