@@ -2,7 +2,7 @@
 
 > **不是罗列方法，而是讲述一个完整的调试故事——为什么你会失败，问题根源在哪里，以及最终如何系统性解决。**
 >
-> 作者：Alex 团队（Optimus 总指挥）  
+> 作者：（Optimus 总指挥）  
 > 日期：2026-05-02  
 > 更新：2026-05-16（新增方案 C：Lexical `setEditorState`，修正历史错误记录）  
 > 环境：Ubuntu 24.04 ARM64 + Chromium 143 + Playwright
