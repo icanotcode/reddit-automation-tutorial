@@ -637,6 +637,8 @@ print(content)  # "Hello world" ✅
 ### 方案 C：Lexical `setEditorState`（2026-05-16 推荐 ✅）
 
 > **这是目前最可靠的方案**，直接操作 Lexical 编辑器的内部状态，完全绕过键盘事件链。已验证在当前 Reddit 的 Lexical 0.36.1 上成功发布评论。
+>
+> **⚠️ 2026-05-16 重要修正**：原代码缺少「展开 composer」步骤，导致 `composer.click()` 无效。Reddit 的 `comment-composer-host` 初始状态是折叠的，必须先展开才能操作。
 
 #### 核心原理
 
@@ -647,6 +649,7 @@ Lexical 是**状态驱动**的富文本编辑器。DOM 只是状态的渲染结�
 1. **选择器**：`shreddit-composer`（不是 `comment-composer-host`）
 2. **编辑器实例**：`contenteditable` div 上挂着 `__lexicalEditor`
 3. **输入方式**：`editor.parseEditorState(JSON) + editor.setEditorState(state)`
+4. **⚠️ 展开 composer**：`comment-composer-host` 初始折叠，必须用 CDP `dispatchMouseEvent` 点击展开（JS `click()` 无效）
 
 #### 完整代码
 
@@ -702,16 +705,119 @@ def comment_with_seteditorstate(post_url, comment_text):
         ws.close()
         return False
     
-    # Step 3: 点击聚焦编辑器
+    # Step 3: 展开 composer（⚠️ 关键修正：必须先展开！）
+    # Reddit 的 comment-composer-host 初始是折叠的，shreddit-composer 高度为 0
+    # JS 的 element.click() 无法展开，必须用 CDP dispatchMouseEvent 模拟真实鼠标点击
+    
+    # 3a: 滚动到 host 位置
     ws.send(json.dumps({
         "id": 3,
         "method": "Runtime.evaluate",
         "params": {
             "expression": """
                 (() => {
+                    let host = document.querySelector('comment-composer-host');
+                    if (host) {
+                        host.scrollIntoView({behavior: 'instant', block: 'center'});
+                        return 'Scrolled';
+                    }
+                    return 'No host';
+                })()
+            """,
+            "returnByValue": True
+        }
+    }))
+    ws.recv()
+    time.sleep(2)
+    
+    # 3b: 获取 host 位置
+    ws.send(json.dumps({
+        "id": 4,
+        "method": "Runtime.evaluate",
+        "params": {
+            "expression": """
+                (() => {
+                    let host = document.querySelector('comment-composer-host');
+                    if (!host) return null;
+                    let rect = host.getBoundingClientRect();
+                    return {x: rect.x, y: rect.y, w: rect.width, h: rect.height};
+                })()
+            """,
+            "returnByValue": True
+        }
+    }))
+    r = ws.recv()
+    host_rect = json.loads(r)['result']['result']['value']
+    
+    if not host_rect:
+        print("❌ 无法获取 comment-composer-host 位置")
+        ws.close()
+        return False
+    
+    # 3c: CDP 鼠标点击 host 中心（JS click 无效！）
+    x = host_rect['x'] + host_rect['w'] / 2
+    y = host_rect['y'] + host_rect['h'] / 2
+    ws.send(json.dumps({
+        "id": 5,
+        "method": "Input.dispatchMouseEvent",
+        "params": {
+            "type": "mousePressed",
+            "x": x, "y": y,
+            "button": "left",
+            "clickCount": 1
+        }
+    }))
+    ws.recv()
+    ws.send(json.dumps({
+        "id": 6,
+        "method": "Input.dispatchMouseEvent",
+        "params": {
+            "type": "mouseReleased",
+            "x": x, "y": y,
+            "button": "left",
+            "clickCount": 1
+        }
+    }))
+    ws.recv()
+    time.sleep(2)
+    
+    # 3d: 验证 composer 已展开
+    ws.send(json.dumps({
+        "id": 7,
+        "method": "Runtime.evaluate",
+        "params": {
+            "expression": """
+                (() => {
+                    let composer = document.querySelector('shreddit-composer');
+                    let btn = composer?.querySelector('[slot="submit-button"]');
+                    return {
+                        composerH: composer?.getBoundingClientRect().height || 0,
+                        btnW: btn?.getBoundingClientRect().width || 0
+                    };
+                })()
+            """,
+            "returnByValue": True
+        }
+    }))
+    r = ws.recv()
+    dims = json.loads(r)['result']['result']['value']
+    
+    if dims['composerH'] == 0:
+        print("❌ Composer 未展开，无法继续")
+        ws.close()
+        return False
+    
+    print(f"✅ Composer 已展开: {dims}")
+    
+    # Step 4: 点击聚焦编辑器
+    ws.send(json.dumps({
+        "id": 8,
+        "method": "Runtime.evaluate",
+        "params": {
+            "expression": """
+                (() => {
                     let composer = document.querySelector('shreddit-composer');
                     if (composer) {
-                        composer.click();
                         let box = composer.querySelector('[contenteditable="true"]');
                         if (box) { box.focus(); box.click(); }
                         return 'Focused';
@@ -725,12 +831,12 @@ def comment_with_seteditorstate(post_url, comment_text):
     ws.recv()
     time.sleep(1)
     
-    # Step 4: 使用 setEditorState 设置评论内容
+    # Step 5: 使用 setEditorState 设置评论内容
     import json as json_lib
     safe_text = json_lib.dumps(comment_text)
     
     ws.send(json.dumps({
-        "id": 4,
+        "id": 9,
         "method": "Runtime.evaluate",
         "params": {
             "expression": f"""
@@ -757,12 +863,12 @@ def comment_with_seteditorstate(post_url, comment_text):
     }))
     r = ws.recv()
     result = json.loads(r)['result']['result']['value']
-    print(f"输入结果: {{result}}")
+    print(f"输入结果: {result}")
     time.sleep(1)
     
-    # Step 5: 验证输入
+    # Step 6: 验证输入
     ws.send(json.dumps({
-        "id": 5,
+        "id": 10,
         "method": "Runtime.evaluate",
         "params": {
             "expression": """
@@ -780,16 +886,16 @@ def comment_with_seteditorstate(post_url, comment_text):
     }))
     r = ws.recv()
     verify = json.loads(r)['result']['result']['value']
-    print(f"验证: {{verify}}")
+    print(f"验证: {verify}")
     
     if not verify.get('hasContent'):
         print("❌ 输入验证失败")
         ws.close()
         return False
     
-    # Step 6: 点击 Comment 按钮
+    # Step 7: 点击 Comment 按钮
     ws.send(json.dumps({
-        "id": 6,
+        "id": 11,
         "method": "Runtime.evaluate",
         "params": {
             "expression": """
@@ -798,38 +904,47 @@ def comment_with_seteditorstate(post_url, comment_text):
                     let btn = buttons.find(b => b.textContent?.trim().toLowerCase() === 'comment');
                     if (btn && !btn.disabled) {
                         btn.click();
-                        return 'Clicked';
+                        return 'submit_clicked';
                     }
-                    return 'No button or disabled';
+                    return 'no_submit_button';
                 })()
             """,
             "returnByValue": True
         }
     }))
-    ws.recv()
-    time.sleep(3)
+    r = ws.recv()
+    submit_result = json.loads(r)['result']['result']['value']
+    print(f"提交结果: {submit_result}")
+    time.sleep(5)
     
-    # Step 7: 验证评论是否发布
+    # Step 8: 验证评论是否发布
     ws.send(json.dumps({
-        "id": 7,
+        "id": 12,
         "method": "Runtime.evaluate",
         "params": {
             "expression": f"""
                 (() => {{
                     let pageText = document.body.innerText;
                     let preview = {json_lib.dumps(comment_text[:20])};
-                    return pageText.includes(preview);
+                    return {{
+                        found: pageText.includes(preview),
+                        composerEmpty: (() => {{
+                            let composer = document.querySelector('shreddit-composer');
+                            let box = composer?.querySelector('[contenteditable="true"]');
+                            return !(box?.innerText?.trim());
+                        }})()
+                    }};
                 }})()
             """,
             "returnByValue": True
         }
     }))
     r = ws.recv()
-    found = json.loads(r)['result']['result']['value']
+    final = json.loads(r)['result']['result']['value']
     
     ws.close()
     
-    if found:
+    if final.get('found') or final.get('composerEmpty'):
         print("✅ 评论发布成功！")
         return True
     else:
@@ -853,9 +968,14 @@ if __name__ == "__main__":
 | Lexical 0.36.1 | 观察到字符乱序 | 稳定可靠 |
 | 速度 | 每字符 50ms+，长文本慢 | 一次性设置，毫秒级 |
 | 可靠性 | 受时序影响 | 原子操作，状态直接写入 |
-| 复杂度 | 需要处理每个字符 | 一次 JSON 状态设置 |
+| composer 展开 | 同样需要展开步骤 | 同样需要展开步骤 |
 
 #### 注意事项
+
+1. **必须先展开 composer**：`comment-composer-host` 初始折叠，`shreddit-composer` 高度为 0。JS `click()` 无法展开，必须用 CDP `dispatchMouseEvent`。
+2. **帖子必须存在**：导航后检查 `shreddit-composer` 和 `shreddit-post` 是否存在。
+3. **JSON 转义**：评论文本中的引号需要正确转义，使用 `json.dumps()` 处理。
+4. **EditorState 格式**：必须是完整的 Lexical JSON 结构。
 
 1. **帖子必须存在**：导航后检查 `shreddit-composer` 和 `shreddit-post` 是否存在。Reddit 对不存在/已删除的帖子返回 "Page not found"，此时没有编辑器。
 2. **JSON 转义**：评论文本中的引号需要正确转义，使用 `json.dumps()` 处理。
