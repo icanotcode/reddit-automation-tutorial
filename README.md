@@ -445,9 +445,9 @@ Reddit、Twitter、Facebook、Cloudflare 等都能识别 headless 模式，并�
 
 > **2026-05-16 重要更新**：新增方案 C（Lexical `setEditorState`）。这是目前最可靠的方案，直接操作 Lexical 编辑器内部状态，绕过所有键盘事件问题。同时修正历史记录：`innerText + InputEvent` 从未成功过（选择器错误），而非"Reddit 最近升级导致失效"。
 
-### 方案 A：纯 CDP WebSocket 键盘事件（轻量但已过时）
+### 方案 A：纯 CDP WebSocket 键盘事件（轻量，但有字符乱序风险）
 
-> ⚠️ **2026-05-16 更新**：此方案在 Lexical 0.36+ 已不可靠。Reddit 的 Lexical 编辑器会拦截/忽略合成键盘事件，导致字符乱序或丢失。建议改用方案 C。
+> ⚠️ **2026-05-16 更新**：此方案在 Lexical 0.36+ 可能出现字符乱序（如 "Thatg's" 而非 "That's"）。Reddit 的 Lexical 编辑器对合成键盘事件的处理有变化。如果追求稳定性，建议改用方案 C。
 
 这是最初验证成功的方法。**关键在于发送完整的事件序列**。
 
@@ -550,7 +550,7 @@ for char in "Hello world":
 ✅ CDP dispatchKeyEvent 成功！
 ```
 
-**2026-05-16 更新**：此方案在后续测试中出现字符乱序问题（如 "Thatg's" 而非 "That's"）。Lexical 0.36+ 对合成键盘事件的处理有变化，不建议在新环境中使用。
+**2026-05-16 更新**：此方案在后续测试中出现字符乱序问题（如 "Thatg's" 而非 "That's"）。Lexical 0.36+ 对合成键盘事件的处理有变化，在需要稳定输入的场景建议改用方案 C。
 
 #### 为什么完整序列能工作？（历史记录）
 
@@ -563,9 +563,9 @@ Lexical 编辑器内部监听的是 `keydown` 事件，不是 `char` 事件。�
 
 ---
 
-### 方案 B：Playwright + CDP（更高级，功能更丰富）
+### 方案 B：Playwright + CDP（更高级，功能更丰富，同样有字符乱序风险）
 
-> ⚠️ **2026-05-16 更新**：同样受 Lexical 键盘事件拦截影响。`keyboard.type()` 底层也是方案 A 的封装，可能遇到同样问题。
+> ⚠️ **2026-05-16 更新**：同样受 Lexical 键盘事件处理变化影响。`keyboard.type()` 底层也是方案 A 的封装，在 Lexical 0.36+ 上可能出现同样问题。
 
 Playwright 的 `keyboard.type()` 底层就是方案 A 的封装，但提供了更多功能。
 
@@ -850,9 +850,9 @@ if __name__ == "__main__":
 | 对比项 | 方案 A (键盘事件) | 方案 C (setEditorState) |
 |--------|-------------------|------------------------|
 | 事件依赖 | 需要 `keyDown→char→keyUp` 完整链 | 直接操作状态，不依赖事件 |
-| Lexical 拦截 | 可能被拦截/乱序 | 完全绕过拦截 |
+| Lexical 0.36+ | 可能出现字符乱序 | 稳定可靠 |
 | 速度 | 每字符 50ms+，长文本慢 | 一次性设置，毫秒级 |
-| 可靠性 | 受时序影响，可能丢字符 | 原子操作，100% 可靠 |
+| 可靠性 | 受时序影响 | 原子操作，状态直接写入 |
 | 复杂度 | 需要处理每个字符 | 一次 JSON 状态设置 |
 
 #### 注意事项
@@ -1089,7 +1089,7 @@ if __name__ == "__main__":
 
 ### 给其他开发者的建议
 
-1. **遇到 Lexical 编辑器，直接用 `setEditorState()`**。不要浪费时间在 `keyboard.type()`、`fill()`、`execCommand` 或底层 CDP 键盘事件上。
+1. **遇到 Lexical 编辑器，优先尝试 `setEditorState()`**。如果环境限制只能用键盘事件，方案 A/B 仍可使用，但需测试确认无乱序。
 
 2. **遇到 Web Components + Shadow DOM，先用 JavaScript 直接操作**。Playwright 的可见性检查对复杂组件经常失效。
 
